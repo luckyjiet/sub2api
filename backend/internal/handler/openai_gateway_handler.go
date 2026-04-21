@@ -138,7 +138,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	setOpsRequestContext(c, "", false, body)
 	sessionHashBody := body
 	if service.IsOpenAIResponsesCompactPathForTest(c) {
-		if compactSeed := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); compactSeed != "" {
+		compactSeed := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+		if compactSeed == "" {
+			compactSeed = strings.TrimSpace(gjson.GetBytes(body, "promptCacheKey").String())
+		}
+		if compactSeed != "" {
 			c.Set(service.OpenAICompactSessionSeedKeyForTest(), compactSeed)
 		}
 		normalizedCompactBody, normalizedCompact, compactErr := service.NormalizeOpenAICompactRequestBodyForTest(body)

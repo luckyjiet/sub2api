@@ -42,3 +42,25 @@ func TestNormalizeResponsesBodyServiceTier(t *testing.T) {
 	require.Empty(t, tier)
 	require.False(t, gjson.GetBytes(body, "service_tier").Exists())
 }
+
+func TestNormalizeResponsesPromptCacheKey_CamelCaseToSnakeCase(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":[],"promptCacheKey":" ses_camel_1 "}`)
+	normalized, err := normalizeResponsesPromptCacheKey(body, "ses_camel_1")
+	require.NoError(t, err)
+	require.Equal(t, "ses_camel_1", gjson.GetBytes(normalized, "prompt_cache_key").String())
+	require.False(t, gjson.GetBytes(normalized, "promptCacheKey").Exists())
+}
+
+func TestNormalizeResponsesPromptCacheKey_KeepSnakeCase(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":[],"prompt_cache_key":"ses_snake_1"}`)
+	normalized, err := normalizeResponsesPromptCacheKey(body, "ses_snake_1")
+	require.NoError(t, err)
+	require.Equal(t, "ses_snake_1", gjson.GetBytes(normalized, "prompt_cache_key").String())
+	require.False(t, gjson.GetBytes(normalized, "promptCacheKey").Exists())
+}
+
+func TestNormalizeResponsesPromptCacheKey_EmptyBody(t *testing.T) {
+	normalized, err := normalizeResponsesPromptCacheKey(nil, "ses_any")
+	require.NoError(t, err)
+	require.Nil(t, normalized)
+}

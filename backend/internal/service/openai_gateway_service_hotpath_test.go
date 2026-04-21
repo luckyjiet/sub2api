@@ -25,6 +25,13 @@ func TestExtractOpenAIRequestMetaFromBody(t *testing.T) {
 			wantPromptKey: "ses-1",
 		},
 		{
+			name:          "兼容 promptCacheKey",
+			body:          []byte(`{"model":"gpt-5.4","stream":false,"promptCacheKey":" ses-camel-1 "}`),
+			wantModel:     "gpt-5.4",
+			wantStream:    false,
+			wantPromptKey: "ses-camel-1",
+		},
+		{
 			name:          "缺失可选字段",
 			body:          []byte(`{"model":"gpt-4"}`),
 			wantModel:     "gpt-4",

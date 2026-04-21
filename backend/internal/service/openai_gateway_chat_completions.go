@@ -67,6 +67,9 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey == "" {
+		promptCacheKey = extractOpenAIPromptCacheKeyFromBody(body)
+	}
 	compatPromptCacheInjected := false
 	if promptCacheKey == "" && account.Type == AccountTypeOAuth && shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
 		promptCacheKey = deriveCompatPromptCacheKey(&chatReq, upstreamModel)
@@ -133,6 +136,11 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		if err != nil {
 			return nil, fmt.Errorf("marshal responses request: %w", err)
 		}
+	}
+
+	responsesBody, err = normalizeResponsesPromptCacheKey(responsesBody, promptCacheKey)
+	if err != nil {
+		return nil, err
 	}
 
 	logFields := []zap.Field{
@@ -312,6 +320,29 @@ func normalizedOpenAIServiceTierValue(raw string) string {
 		return ""
 	}
 	return *normalized
+}
+
+func normalizeResponsesPromptCacheKey(body []byte, promptCacheKey string) ([]byte, error) {
+	if len(body) == 0 {
+		return body, nil
+	}
+	key := strings.TrimSpace(promptCacheKey)
+	normalized := body
+	if key != "" {
+		next, err := sjson.SetBytes(normalized, "prompt_cache_key", key)
+		if err != nil {
+			return body, fmt.Errorf("set prompt_cache_key: %w", err)
+		}
+		normalized = next
+	}
+	if gjson.GetBytes(normalized, "promptCacheKey").Exists() {
+		next, err := sjson.DeleteBytes(normalized, "promptCacheKey")
+		if err != nil {
+			return body, fmt.Errorf("delete promptCacheKey: %w", err)
+		}
+		normalized = next
+	}
+	return normalized, nil
 }
 
 // handleChatCompletionsErrorResponse reads an upstream error and returns it in

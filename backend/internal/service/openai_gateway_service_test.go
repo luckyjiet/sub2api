@@ -154,6 +154,7 @@ func TestOpenAIGatewayService_GenerateSessionHash_Priority(t *testing.T) {
 	svc := &OpenAIGatewayService{}
 
 	bodyWithKey := []byte(`{"prompt_cache_key":"ses_aaa"}`)
+	bodyWithCamelKey := []byte(`{"promptCacheKey":"ses_camel_aaa"}`)
 
 	// 1) session_id header wins
 	c.Request.Header.Set("session_id", "sess-123")
@@ -188,6 +189,31 @@ func TestOpenAIGatewayService_GenerateSessionHash_Priority(t *testing.T) {
 	if h4 != "" {
 		t.Fatalf("expected empty hash when no signals")
 	}
+
+	// 5) promptCacheKey (camelCase) should also work
+	h5 := svc.GenerateSessionHash(c, bodyWithCamelKey)
+	if h5 == "" {
+		t.Fatalf("expected non-empty hash for promptCacheKey")
+	}
+	if h3 == h5 {
+		t.Fatalf("expected different hashes for different keys")
+	}
+}
+
+func TestOpenAIGatewayService_ExtractSessionID_RecognizesPromptCacheKeyCamelCase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", nil)
+
+	svc := &OpenAIGatewayService{}
+
+	got := svc.ExtractSessionID(c, []byte(`{"promptCacheKey":" ses_camel_123 "}`))
+	require.Equal(t, "ses_camel_123", got)
+
+	c.Request.Header.Set("session_id", "header-session")
+	got = svc.ExtractSessionID(c, []byte(`{"promptCacheKey":"ses_camel_456"}`))
+	require.Equal(t, "header-session", got, "header should still have higher priority")
 }
 
 func TestOpenAIGatewayService_GenerateSessionHash_UsesXXHash64(t *testing.T) {

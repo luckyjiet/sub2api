@@ -1116,7 +1116,7 @@ func (s *OpenAIGatewayService) ExtractSessionID(c *gin.Context, body []byte) str
 		sessionID = strings.TrimSpace(c.GetHeader("conversation_id"))
 	}
 	if sessionID == "" && len(body) > 0 {
-		sessionID = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+		sessionID = extractOpenAIPromptCacheKeyFromBody(body)
 	}
 	return sessionID
 }
@@ -1126,7 +1126,7 @@ func (s *OpenAIGatewayService) ExtractSessionID(c *gin.Context, body []byte) str
 // Priority:
 //  1. Header: session_id
 //  2. Header: conversation_id
-//  3. Body:   prompt_cache_key (opencode)
+//  3. Body:   prompt_cache_key / promptCacheKey (OpenCode/Codex compatible)
 //  4. Body:   content-based fallback (model + system + tools + first user message)
 func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) string {
 	if c == nil {
@@ -1138,7 +1138,7 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 		sessionID = strings.TrimSpace(c.GetHeader("conversation_id"))
 	}
 	if sessionID == "" && len(body) > 0 {
-		sessionID = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+		sessionID = extractOpenAIPromptCacheKeyFromBody(body)
 	}
 	if sessionID == "" && len(body) > 0 {
 		sessionID = deriveOpenAIContentSessionSeed(body)
@@ -1875,6 +1875,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if v, ok := reqBody["prompt_cache_key"].(string); ok {
 			promptCacheKey = strings.TrimSpace(v)
 		}
+		if promptCacheKey == "" {
+			if v, ok := reqBody["promptCacheKey"].(string); ok {
+				promptCacheKey = strings.TrimSpace(v)
+			}
+		}
 	}
 
 	// Track if body needs re-serialization
@@ -1926,6 +1931,22 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	disablePatch := func() {
 		patchDisabled = true
+	}
+
+	// 兼容客户端使用 camelCase（promptCacheKey）传递缓存键：
+	// 统一规范为 prompt_cache_key，避免上游识别差异导致缓存命中下降。
+	if promptCacheKey != "" {
+		if v, ok := reqBody["prompt_cache_key"].(string); !ok || strings.TrimSpace(v) == "" {
+			reqBody["prompt_cache_key"] = promptCacheKey
+			bodyModified = true
+			markPatchSet("prompt_cache_key", promptCacheKey)
+		}
+	}
+	if _, hasCamelPromptCacheKey := reqBody["promptCacheKey"]; hasCamelPromptCacheKey {
+		delete(reqBody, "promptCacheKey")
+		bodyModified = true
+		// 与 prompt_cache_key 变更属于多路径修改，退回全量序列化。
+		disablePatch()
 	}
 
 	// 非透传模式下，instructions 为空时注入默认指令。
@@ -2744,7 +2765,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// OAuth 透传到 ChatGPT internal API 时补齐必要头。
 	if account.Type == AccountTypeOAuth {
-		promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+		promptCacheKey := extractOpenAIPromptCacheKeyFromBody(body)
 		req.Host = "chatgpt.com"
 		if chatgptAccountID := account.GetChatGPTAccountID(); chatgptAccountID != "" {
 			req.Header.Set("chatgpt-account-id", chatgptAccountID)
@@ -5005,8 +5026,18 @@ func extractOpenAIRequestMetaFromBody(body []byte) (model string, stream bool, p
 
 	model = strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	stream = gjson.GetBytes(body, "stream").Bool()
-	promptCacheKey = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+	promptCacheKey = extractOpenAIPromptCacheKeyFromBody(body)
 	return model, stream, promptCacheKey
+}
+
+func extractOpenAIPromptCacheKeyFromBody(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if key := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); key != "" {
+		return key
+	}
+	return strings.TrimSpace(gjson.GetBytes(body, "promptCacheKey").String())
 }
 
 // normalizeOpenAIPassthroughOAuthBody 将透传 OAuth 请求体收敛为旧链路关键行为：
