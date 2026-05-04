@@ -1,0 +1,14 @@
+ARG NODE_IMAGE=node:24-alpine
+
+FROM ${NODE_IMAGE} AS base
+WORKDIR /app/frontend
+RUN corepack enable && corepack prepare pnpm@latest --activate
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY frontend/ ./
+
+FROM base AS vue-tsc-check
+RUN timeout 180s sh -lc 'pnpm exec vue-tsc --noEmit'
+
+FROM base AS vite-build
+RUN timeout 180s sh -lc 'pnpm exec vite build'

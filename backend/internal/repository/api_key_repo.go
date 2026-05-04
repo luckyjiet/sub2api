@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 
@@ -81,7 +82,9 @@ func (r *apiKeyRepository) GetByID(ctx context.Context, id int64) (*service.APIK
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	out := apiKeyEntityToService(m)
+	r.applySingleDayCardMode(ctx, out)
+	return out, nil
 }
 
 // GetKeyAndOwnerID 根据 API Key ID 获取其 key 与所有者（用户）ID。
@@ -115,7 +118,9 @@ func (r *apiKeyRepository) GetByKey(ctx context.Context, key string) (*service.A
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	out := apiKeyEntityToService(m)
+	r.applySingleDayCardMode(ctx, out)
+	return out, nil
 }
 
 func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*service.APIKey, error) {
@@ -189,7 +194,9 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	out := apiKeyEntityToService(m)
+	r.applySingleDayCardMode(ctx, out)
+	return out, nil
 }
 
 func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey) error {
@@ -607,6 +614,55 @@ func (r *apiKeyRepository) GetRateLimitData(ctx context.Context, id int64) (resu
 		return nil, err
 	}
 	return data, rows.Err()
+}
+
+func (r *apiKeyRepository) applySingleDayCardMode(ctx context.Context, key *service.APIKey) {
+	if key == nil || key.Group == nil {
+		return
+	}
+	modes, err := r.loadSingleDayCardModes(ctx, []int64{key.Group.ID})
+	if err != nil {
+		return
+	}
+	if enabled, ok := modes[key.Group.ID]; ok {
+		key.Group.SingleDayCardMode = enabled
+	}
+}
+
+func (r *apiKeyRepository) loadSingleDayCardModes(ctx context.Context, groupIDs []int64) (map[int64]bool, error) {
+	result := make(map[int64]bool, len(groupIDs))
+	if len(groupIDs) == 0 {
+		return result, nil
+	}
+	client := clientFromContext(ctx, r.client)
+	rows, err := client.QueryContext(
+		ctx,
+		"SELECT id, single_day_card_mode FROM groups WHERE id = ANY($1)",
+		pq.Array(groupIDs),
+	)
+	if err != nil {
+		// Graceful fallback for legacy test DB schemas that have not applied this migration yet.
+		if strings.Contains(strings.ToLower(err.Error()), "single_day_card_mode") {
+			return result, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id      int64
+			enabled bool
+		)
+		if err := rows.Scan(&id, &enabled); err != nil {
+			return nil, err
+		}
+		result[id] = enabled
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {

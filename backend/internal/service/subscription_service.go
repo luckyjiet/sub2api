@@ -164,6 +164,7 @@ func (s *SubscriptionService) AssignSubscription(ctx context.Context, input *Ass
 // 如果用户已有同分组的订阅：
 //   - 未过期：从当前过期时间累加天数
 //   - 已过期：从当前时间开始计算新的过期时间，并激活订阅
+//   - 若分组启用 single_day_card_mode：每次兑换都按“从当前时间重新开始”覆盖有效期，并重置额度窗口
 //
 // 如果没有订阅：创建新订阅
 func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
@@ -183,20 +184,17 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 		existingSub = nil
 	}
 
-	validityDays := input.ValidityDays
-	if validityDays <= 0 {
-		validityDays = 30
-	}
-	if validityDays > MaxValidityDays {
-		validityDays = MaxValidityDays
-	}
+	validityDays := normalizeAssignValidityDaysForGroup(input.ValidityDays, group)
 
 	// 已有订阅，执行续期（在事务中完成所有更新）
 	if existingSub != nil {
 		now := time.Now()
 		var newExpiresAt time.Time
 
-		if existingSub.ExpiresAt.After(now) {
+		if group.IsSingleDayCard() {
+			// 单日卡模式：重复兑换始终从当前时间覆盖有效期，不累计剩余时长。
+			newExpiresAt = now.AddDate(0, 0, validityDays)
+		} else if existingSub.ExpiresAt.After(now) {
 			// 未过期：从当前过期时间累加
 			newExpiresAt = existingSub.ExpiresAt.AddDate(0, 0, validityDays)
 		} else {
@@ -216,17 +214,41 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 		}
 		txCtx := dbent.NewTxContext(ctx, tx)
 
-		// 更新过期时间
-		if err := s.userSubRepo.ExtendExpiry(txCtx, existingSub.ID, newExpiresAt); err != nil {
-			_ = tx.Rollback()
-			return nil, false, fmt.Errorf("extend subscription: %w", err)
-		}
-
-		// 如果订阅已过期或被暂停，恢复为active状态
-		if existingSub.Status != SubscriptionStatusActive {
-			if err := s.userSubRepo.UpdateStatus(txCtx, existingSub.ID, SubscriptionStatusActive); err != nil {
+		if group.IsSingleDayCard() {
+			// 单日卡模式：重置起始时间、到期时间与状态；并重置各周期用量窗口。
+			if _, err := tx.UserSubscription.UpdateOneID(existingSub.ID).
+				SetStartsAt(now).
+				SetExpiresAt(newExpiresAt).
+				SetStatus(SubscriptionStatusActive).
+				Save(txCtx); err != nil {
 				_ = tx.Rollback()
-				return nil, false, fmt.Errorf("update subscription status: %w", err)
+				return nil, false, fmt.Errorf("replace single-day subscription window: %w", err)
+			}
+			if err := s.userSubRepo.ResetDailyUsage(txCtx, existingSub.ID, now); err != nil {
+				_ = tx.Rollback()
+				return nil, false, fmt.Errorf("reset single-day daily usage: %w", err)
+			}
+			if err := s.userSubRepo.ResetWeeklyUsage(txCtx, existingSub.ID, now); err != nil {
+				_ = tx.Rollback()
+				return nil, false, fmt.Errorf("reset single-day weekly usage: %w", err)
+			}
+			if err := s.userSubRepo.ResetMonthlyUsage(txCtx, existingSub.ID, now); err != nil {
+				_ = tx.Rollback()
+				return nil, false, fmt.Errorf("reset single-day monthly usage: %w", err)
+			}
+		} else {
+			// 更新过期时间
+			if err := s.userSubRepo.ExtendExpiry(txCtx, existingSub.ID, newExpiresAt); err != nil {
+				_ = tx.Rollback()
+				return nil, false, fmt.Errorf("extend subscription: %w", err)
+			}
+
+			// 如果订阅已过期或被暂停，恢复为active状态
+			if existingSub.Status != SubscriptionStatusActive {
+				if err := s.userSubRepo.UpdateStatus(txCtx, existingSub.ID, SubscriptionStatusActive); err != nil {
+					_ = tx.Rollback()
+					return nil, false, fmt.Errorf("update subscription status: %w", err)
+				}
 			}
 		}
 
@@ -265,7 +287,9 @@ func (s *SubscriptionService) AssignOrExtendSubscription(ctx context.Context, in
 	}
 
 	// 没有订阅，创建新订阅
-	sub, err := s.createSubscription(ctx, input)
+	createInput := *input
+	createInput.ValidityDays = validityDays
+	sub, err := s.createSubscription(ctx, &createInput)
 	if err != nil {
 		return nil, false, err
 	}
@@ -462,6 +486,20 @@ func normalizeAssignValidityDays(days int) int {
 	return days
 }
 
+func normalizeAssignValidityDaysForGroup(days int, group *Group) int {
+	if days <= 0 {
+		if group != nil && group.IsSingleDayCard() {
+			days = 1
+		} else {
+			days = 30
+		}
+	}
+	if days > MaxValidityDays {
+		days = MaxValidityDays
+	}
+	return days
+}
+
 // RevokeSubscription 撤销订阅
 func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscriptionID int64) error {
 	// 先获取订阅信息用于失效缓存
@@ -651,7 +689,7 @@ func normalizeExpiredWindows(subs []UserSubscription) {
 	for i := range subs {
 		sub := &subs[i]
 		// 日窗口过期：清零展示数据
-		if sub.NeedsDailyReset() {
+		if sub.NeedsDailyReset() && !sub.SkipDailyReset(sub.Group) {
 			sub.DailyWindowStart = nil
 			sub.DailyUsageUSD = 0
 		}
@@ -741,9 +779,18 @@ func (s *SubscriptionService) CheckAndResetWindows(ctx context.Context, sub *Use
 	// 使用当天零点作为新窗口起始时间
 	windowStart := startOfDay(time.Now())
 	needsInvalidateCache := false
+	group := sub.Group
+	if group == nil && sub.GroupID > 0 {
+		loadedGroup, err := s.groupRepo.GetByID(ctx, sub.GroupID)
+		if err != nil {
+			return err
+		}
+		group = loadedGroup
+		sub.Group = loadedGroup
+	}
 
 	// 日窗口重置（24小时）
-	if sub.NeedsDailyReset() {
+	if sub.NeedsDailyReset() && !sub.SkipDailyReset(group) {
 		if err := s.userSubRepo.ResetDailyUsage(ctx, sub.ID, windowStart); err != nil {
 			return err
 		}
@@ -815,7 +862,7 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 
 	// 2. 内存中修正过期窗口的用量，确保 CheckUsageLimits 不会误拒绝用户
 	//    实际的 DB 窗口重置由 DoWindowMaintenance 异步完成
-	if sub.NeedsDailyReset() {
+	if sub.NeedsDailyReset() && !sub.SkipDailyReset(group) {
 		sub.DailyUsageUSD = 0
 		needsMaintenance = true
 	}

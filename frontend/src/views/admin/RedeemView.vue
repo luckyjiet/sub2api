@@ -283,8 +283,22 @@
                   min="1"
                   max="365"
                   required
-                  class="input"
+                  :disabled="isSingleDayCardSelected"
+                  class="input disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500 dark:disabled:bg-dark-700 dark:disabled:text-dark-400"
                 />
+                <p class="input-hint">
+                  {{
+                    isSingleDayCardSelected
+                      ? t('admin.redeem.singleDayValidityLockedHint')
+                      : t('admin.redeem.validityHint')
+                  }}
+                </p>
+              </div>
+              <div
+                v-if="isSingleDayCardSelected"
+                class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-800/50 dark:bg-amber-900/20 dark:text-amber-300"
+              >
+                {{ t('admin.redeem.singleDayRedeemNotice') }}
               </div>
             </template>
             <div>
@@ -429,6 +443,7 @@ interface GroupOption {
   platform: GroupPlatform
   subscriptionType: SubscriptionType
   rate: number
+  singleDayCardMode: boolean
 }
 
 const showGenerateDialog = ref(false)
@@ -446,9 +461,19 @@ const subscriptionGroupOptions = computed(() => {
       description: g.description,
       platform: g.platform,
       subscriptionType: g.subscription_type,
-      rate: g.rate_multiplier
+      rate: g.rate_multiplier,
+      singleDayCardMode: g.single_day_card_mode
     }))
 })
+
+const selectedSubscriptionGroup = computed(() => {
+  if (generateForm.type !== 'subscription' || !generateForm.group_id) {
+    return null
+  }
+  return subscriptionGroupOptions.value.find((g) => g.value === generateForm.group_id) || null
+})
+
+const isSingleDayCardSelected = computed(() => selectedSubscriptionGroup.value?.singleDayCardMode === true)
 
 const generatedCodesText = computed(() => {
   return generatedCodes.value.map((code) => code.code).join('\n')
@@ -577,6 +602,21 @@ watch(
   }
 )
 
+watch(
+  [() => generateForm.type, () => generateForm.group_id, isSingleDayCardSelected],
+  () => {
+    if (generateForm.type !== 'subscription') {
+      return
+    }
+    if (isSingleDayCardSelected.value) {
+      generateForm.validity_days = 1
+    } else if (!generateForm.validity_days || generateForm.validity_days < 1) {
+      generateForm.validity_days = 30
+    }
+  },
+  { immediate: true }
+)
+
 const buildRedeemQueryFilters = () => ({
   type: (filters.type || undefined) as RedeemCodeType | undefined,
   status: (filters.status || undefined) as 'used' | 'expired' | 'unused' | undefined,
@@ -666,7 +706,11 @@ const handleGenerateCodes = async () => {
       generateForm.type,
       generateForm.value,
       generateForm.type === 'subscription' ? generateForm.group_id : undefined,
-      generateForm.type === 'subscription' ? generateForm.validity_days : undefined
+      generateForm.type === 'subscription'
+        ? isSingleDayCardSelected.value
+          ? 1
+          : generateForm.validity_days
+        : undefined
     )
     showGenerateDialog.value = false
     generatedCodes.value = result

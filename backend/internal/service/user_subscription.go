@@ -57,6 +57,12 @@ func (s *UserSubscription) NeedsDailyReset() bool {
 	return time.Since(*s.DailyWindowStart) >= 24*time.Hour
 }
 
+// SkipDailyReset returns true only for subscriptions created from
+// single_day_card_mode groups. Duration alone must not change reset policy.
+func (s *UserSubscription) SkipDailyReset(group *Group) bool {
+	return group != nil && group.IsSingleDayCard()
+}
+
 func (s *UserSubscription) NeedsWeeklyReset() bool {
 	if s.WeeklyWindowStart == nil {
 		return false

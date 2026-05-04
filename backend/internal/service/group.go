@@ -24,6 +24,7 @@ type Group struct {
 	WeeklyLimitUSD      *float64
 	MonthlyLimitUSD     *float64
 	DefaultValidityDays int
+	SingleDayCardMode   bool
 
 	// 图片生成计费配置（antigravity 和 gemini 平台使用）
 	ImagePrice1K *float64
@@ -80,6 +81,13 @@ func (g *Group) IsSubscriptionType() bool {
 	return g.SubscriptionType == SubscriptionTypeSubscription
 }
 
+func (g *Group) IsSingleDayCard() bool {
+	return g.IsSubscriptionType() && g.SingleDayCardMode
+}
+
+func (g *Group) IsFreeSubscription() bool {
+	return g.IsSubscriptionType() && g.RateMultiplier == 0
+}
 func (g *Group) HasDailyLimit() bool {
 	return g.DailyLimitUSD != nil && *g.DailyLimitUSD > 0
 }

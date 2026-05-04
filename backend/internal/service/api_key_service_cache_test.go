@@ -249,6 +249,7 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 			Platform:              PlatformOpenAI,
 			Status:                StatusActive,
 			SubscriptionType:      SubscriptionTypeStandard,
+			SingleDayCardMode:     true,
 			RateMultiplier:        1,
 			AllowMessagesDispatch: true,
 			DefaultMappedModel:    "gpt-5.4",
@@ -268,6 +269,7 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 
 	require.NotNil(t, roundTrip)
 	require.NotNil(t, roundTrip.Group)
+	require.True(t, roundTrip.Group.SingleDayCardMode)
 	require.Equal(t, apiKey.Group.MessagesDispatchModelConfig, roundTrip.Group.MessagesDispatchModelConfig)
 }
 

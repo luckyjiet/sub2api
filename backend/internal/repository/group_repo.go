@@ -76,6 +76,9 @@ func (r *groupRepository) Create(ctx context.Context, groupIn *service.Group) er
 
 	created, err := builder.Save(ctx)
 	if err == nil {
+		if updateErr := r.updateSingleDayCardMode(ctx, created.ID, groupIn.SingleDayCardMode); updateErr != nil {
+			return updateErr
+		}
 		groupIn.ID = created.ID
 		groupIn.CreatedAt = created.CreatedAt
 		groupIn.UpdatedAt = created.UpdatedAt
@@ -105,7 +108,13 @@ func (r *groupRepository) GetByIDLite(ctx context.Context, id int64) (*service.G
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrGroupNotFound, nil)
 	}
-	return groupEntityToService(m), nil
+	out := groupEntityToService(m)
+	if out != nil {
+		if mode, modeErr := r.loadSingleDayCardMode(ctx, out.ID); modeErr == nil {
+			out.SingleDayCardMode = mode
+		}
+	}
+	return out, nil
 }
 
 func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) error {
@@ -193,11 +202,102 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 	if err != nil {
 		return translatePersistenceError(err, service.ErrGroupNotFound, service.ErrGroupExists)
 	}
+	if err := r.updateSingleDayCardMode(ctx, groupIn.ID, groupIn.SingleDayCardMode); err != nil {
+		return err
+	}
 	groupIn.UpdatedAt = updated.UpdatedAt
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventGroupChanged, nil, &groupIn.ID, nil); err != nil {
 		logger.LegacyPrintf("repository.group", "[SchedulerOutbox] enqueue group update failed: group=%d err=%v", groupIn.ID, err)
 	}
 	return nil
+}
+
+func (r *groupRepository) updateSingleDayCardMode(ctx context.Context, groupID int64, enabled bool) error {
+	if groupID <= 0 {
+		return nil
+	}
+	if _, err := r.sql.ExecContext(ctx, "UPDATE groups SET single_day_card_mode = $1 WHERE id = $2", enabled, groupID); err != nil {
+		// Graceful fallback for legacy test DB schemas that have not applied this migration yet.
+		if strings.Contains(strings.ToLower(err.Error()), "single_day_card_mode") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (r *groupRepository) loadSingleDayCardMode(ctx context.Context, groupID int64) (bool, error) {
+	if groupID <= 0 {
+		return false, nil
+	}
+	rows, err := r.sql.QueryContext(ctx, "SELECT single_day_card_mode FROM groups WHERE id = $1", groupID)
+	if err != nil {
+		// Graceful fallback for legacy test DB schemas that have not applied this migration yet.
+		if strings.Contains(strings.ToLower(err.Error()), "single_day_card_mode") {
+			return false, nil
+		}
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		return false, rows.Err()
+	}
+	var mode bool
+	if err := rows.Scan(&mode); err != nil {
+		return false, err
+	}
+	return mode, rows.Err()
+}
+
+func (r *groupRepository) loadSingleDayCardModes(ctx context.Context, groupIDs []int64) (map[int64]bool, error) {
+	result := make(map[int64]bool, len(groupIDs))
+	if len(groupIDs) == 0 {
+		return result, nil
+	}
+
+	rows, err := r.sql.QueryContext(ctx,
+		"SELECT id, single_day_card_mode FROM groups WHERE id = ANY($1)",
+		pq.Array(groupIDs),
+	)
+	if err != nil {
+		// Graceful fallback for legacy test DB schemas that have not applied this migration yet.
+		if strings.Contains(strings.ToLower(err.Error()), "single_day_card_mode") {
+			return result, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id   int64
+			mode bool
+		)
+		if err := rows.Scan(&id, &mode); err != nil {
+			return nil, err
+		}
+		result[id] = mode
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (r *groupRepository) applySingleDayCardModes(ctx context.Context, groups []service.Group, groupIDs []int64) {
+	if len(groups) == 0 || len(groupIDs) == 0 {
+		return
+	}
+	modes, err := r.loadSingleDayCardModes(ctx, groupIDs)
+	if err != nil {
+		return
+	}
+	for i := range groups {
+		if enabled, ok := modes[groups[i].ID]; ok {
+			groups[i].SingleDayCardMode = enabled
+		}
+	}
 }
 
 func (r *groupRepository) Delete(ctx context.Context, id int64) error {
@@ -262,6 +362,7 @@ func (r *groupRepository) ListWithFilters(ctx context.Context, params pagination
 		outGroups = append(outGroups, *g)
 		groupIDs = append(groupIDs, g.ID)
 	}
+	r.applySingleDayCardModes(ctx, outGroups, groupIDs)
 
 	counts, err := r.loadAccountCounts(ctx, groupIDs)
 	if err == nil {
@@ -291,6 +392,7 @@ func (r *groupRepository) listWithAccountCountSort(ctx context.Context, q *dbent
 		outGroups = append(outGroups, *g)
 		groupIDs = append(groupIDs, g.ID)
 	}
+	r.applySingleDayCardModes(ctx, outGroups, groupIDs)
 
 	counts, err := r.loadAccountCounts(ctx, groupIDs)
 	if err != nil {
@@ -390,6 +492,7 @@ func (r *groupRepository) ListActive(ctx context.Context) ([]service.Group, erro
 		outGroups = append(outGroups, *g)
 		groupIDs = append(groupIDs, g.ID)
 	}
+	r.applySingleDayCardModes(ctx, outGroups, groupIDs)
 
 	counts, err := r.loadAccountCounts(ctx, groupIDs)
 	if err == nil {
@@ -420,6 +523,7 @@ func (r *groupRepository) ListActiveByPlatform(ctx context.Context, platform str
 		outGroups = append(outGroups, *g)
 		groupIDs = append(groupIDs, g.ID)
 	}
+	r.applySingleDayCardModes(ctx, outGroups, groupIDs)
 
 	counts, err := r.loadAccountCounts(ctx, groupIDs)
 	if err == nil {

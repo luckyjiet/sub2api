@@ -192,6 +192,7 @@
                   </span>
                 </li>
                 <li>{{ t('redeem.codeRule4') }}</li>
+                <li>{{ t('redeem.codeRule5') }}</li>
               </ul>
             </div>
           </div>

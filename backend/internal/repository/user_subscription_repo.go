@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -9,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 type userSubscriptionRepository struct {
@@ -69,7 +71,9 @@ func (r *userSubscriptionRepository) GetByID(ctx context.Context, id int64) (*se
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
-	return userSubscriptionEntityToService(m), nil
+	out := userSubscriptionEntityToService(m)
+	r.applySingleDayCardModes(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) GetByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
@@ -81,7 +85,9 @@ func (r *userSubscriptionRepository) GetByUserIDAndGroupID(ctx context.Context, 
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
-	return userSubscriptionEntityToService(m), nil
+	out := userSubscriptionEntityToService(m)
+	r.applySingleDayCardModes(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) GetActiveByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (*service.UserSubscription, error) {
@@ -98,7 +104,9 @@ func (r *userSubscriptionRepository) GetActiveByUserIDAndGroupID(ctx context.Con
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrSubscriptionNotFound, nil)
 	}
-	return userSubscriptionEntityToService(m), nil
+	out := userSubscriptionEntityToService(m)
+	r.applySingleDayCardModes(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) Update(ctx context.Context, sub *service.UserSubscription) error {
@@ -148,7 +156,9 @@ func (r *userSubscriptionRepository) ListByUserID(ctx context.Context, userID in
 	if err != nil {
 		return nil, err
 	}
-	return userSubscriptionEntitiesToService(subs), nil
+	out := userSubscriptionEntitiesToService(subs)
+	r.applySingleDayCardModesBatch(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) ListActiveByUserID(ctx context.Context, userID int64) ([]service.UserSubscription, error) {
@@ -165,7 +175,9 @@ func (r *userSubscriptionRepository) ListActiveByUserID(ctx context.Context, use
 	if err != nil {
 		return nil, err
 	}
-	return userSubscriptionEntitiesToService(subs), nil
+	out := userSubscriptionEntitiesToService(subs)
+	r.applySingleDayCardModesBatch(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) ListByGroupID(ctx context.Context, groupID int64, params pagination.PaginationParams) ([]service.UserSubscription, *pagination.PaginationResult, error) {
@@ -188,7 +200,9 @@ func (r *userSubscriptionRepository) ListByGroupID(ctx context.Context, groupID 
 		return nil, nil, err
 	}
 
-	return userSubscriptionEntitiesToService(subs), paginationResultFromTotal(int64(total), params), nil
+	out := userSubscriptionEntitiesToService(subs)
+	r.applySingleDayCardModesBatch(ctx, out)
+	return out, paginationResultFromTotal(int64(total), params), nil
 }
 
 func (r *userSubscriptionRepository) List(ctx context.Context, params pagination.PaginationParams, userID, groupID *int64, status, platform, sortBy, sortOrder string) ([]service.UserSubscription, *pagination.PaginationResult, error) {
@@ -265,7 +279,9 @@ func (r *userSubscriptionRepository) List(ctx context.Context, params pagination
 		return nil, nil, err
 	}
 
-	return userSubscriptionEntitiesToService(subs), paginationResultFromTotal(int64(total), params), nil
+	out := userSubscriptionEntitiesToService(subs)
+	r.applySingleDayCardModesBatch(ctx, out)
+	return out, paginationResultFromTotal(int64(total), params), nil
 }
 
 func (r *userSubscriptionRepository) ExistsByUserIDAndGroupID(ctx context.Context, userID, groupID int64) (bool, error) {
@@ -398,7 +414,9 @@ func (r *userSubscriptionRepository) ListExpired(ctx context.Context) ([]service
 	if err != nil {
 		return nil, err
 	}
-	return userSubscriptionEntitiesToService(subs), nil
+	out := userSubscriptionEntitiesToService(subs)
+	r.applySingleDayCardModesBatch(ctx, out)
+	return out, nil
 }
 
 func (r *userSubscriptionRepository) CountByGroupID(ctx context.Context, groupID int64) (int64, error) {
@@ -477,4 +495,89 @@ func applyUserSubscriptionEntityToService(dst *service.UserSubscription, src *db
 	dst.ID = src.ID
 	dst.CreatedAt = src.CreatedAt
 	dst.UpdatedAt = src.UpdatedAt
+}
+
+func (r *userSubscriptionRepository) applySingleDayCardModes(ctx context.Context, sub *service.UserSubscription) {
+	if sub == nil || sub.Group == nil {
+		return
+	}
+	modes, err := r.loadSingleDayCardModes(ctx, []int64{sub.Group.ID})
+	if err != nil {
+		return
+	}
+	if enabled, ok := modes[sub.Group.ID]; ok {
+		sub.Group.SingleDayCardMode = enabled
+	}
+}
+
+func (r *userSubscriptionRepository) applySingleDayCardModesBatch(ctx context.Context, subs []service.UserSubscription) {
+	if len(subs) == 0 {
+		return
+	}
+	seen := make(map[int64]struct{}, len(subs))
+	groupIDs := make([]int64, 0, len(subs))
+	for i := range subs {
+		g := subs[i].Group
+		if g == nil || g.ID <= 0 {
+			continue
+		}
+		if _, ok := seen[g.ID]; ok {
+			continue
+		}
+		seen[g.ID] = struct{}{}
+		groupIDs = append(groupIDs, g.ID)
+	}
+	if len(groupIDs) == 0 {
+		return
+	}
+	modes, err := r.loadSingleDayCardModes(ctx, groupIDs)
+	if err != nil {
+		return
+	}
+	for i := range subs {
+		g := subs[i].Group
+		if g == nil {
+			continue
+		}
+		if enabled, ok := modes[g.ID]; ok {
+			g.SingleDayCardMode = enabled
+		}
+	}
+}
+
+func (r *userSubscriptionRepository) loadSingleDayCardModes(ctx context.Context, groupIDs []int64) (map[int64]bool, error) {
+	result := make(map[int64]bool, len(groupIDs))
+	if len(groupIDs) == 0 {
+		return result, nil
+	}
+
+	client := clientFromContext(ctx, r.client)
+	rows, err := client.QueryContext(
+		ctx,
+		"SELECT id, single_day_card_mode FROM groups WHERE id = ANY($1)",
+		pq.Array(groupIDs),
+	)
+	if err != nil {
+		// Graceful fallback for legacy test DB schemas that have not applied this migration yet.
+		if strings.Contains(strings.ToLower(err.Error()), "single_day_card_mode") {
+			return result, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id      int64
+			enabled bool
+		)
+		if err := rows.Scan(&id, &enabled); err != nil {
+			return nil, err
+		}
+		result[id] = enabled
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

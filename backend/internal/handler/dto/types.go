@@ -88,10 +88,11 @@ type Group struct {
 	IsExclusive    bool    `json:"is_exclusive"`
 	Status         string  `json:"status"`
 
-	SubscriptionType string   `json:"subscription_type"`
-	DailyLimitUSD    *float64 `json:"daily_limit_usd"`
-	WeeklyLimitUSD   *float64 `json:"weekly_limit_usd"`
-	MonthlyLimitUSD  *float64 `json:"monthly_limit_usd"`
+	SubscriptionType  string   `json:"subscription_type"`
+	DailyLimitUSD     *float64 `json:"daily_limit_usd"`
+	WeeklyLimitUSD    *float64 `json:"weekly_limit_usd"`
+	MonthlyLimitUSD   *float64 `json:"monthly_limit_usd"`
+	SingleDayCardMode bool     `json:"single_day_card_mode"`
 
 	// 图片生成计费配置（仅 antigravity 平台使用）
 	ImagePrice1K *float64 `json:"image_price_1k"`
