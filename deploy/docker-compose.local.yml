@@ -24,7 +24,8 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: sub2api/sub2api:sub2api2-fixes-single-day-card-20260504
+    pull_policy: never
     container_name: sub2api
     restart: unless-stopped
     ulimits:
